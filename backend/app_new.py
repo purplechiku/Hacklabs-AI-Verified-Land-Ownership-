@@ -2,15 +2,28 @@ import io
 import json
 import re
 import uuid
+import os
+import hashlib
+
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 import pymupdf
 import pytesseract
+
 from PIL import Image, ImageOps, ImageFilter
 from dateutil import parser as dateparser
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+
+from fastapi import (
+    FastAPI,
+    UploadFile,
+    File,
+    HTTPException,
+    Query,
+)
+
 from fastapi.middleware.cors import CORSMiddleware
 from rapidfuzz import fuzz
 
@@ -21,7 +34,7 @@ from rapidfuzz import fuzz
 
 app = FastAPI(
     title="Adhikar Digital Land Registry",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 
@@ -57,6 +70,25 @@ IMAGE_EXTENSIONS = {
 
 
 # ============================================================
+# BLOCKCHAIN CONFIGURATION
+# ============================================================
+
+# The Python application talks ONLY to the blockchain wrapper.
+#
+# Example:
+#
+# BLOCKCHAIN_SERVICE_URL=http://localhost:4001
+#
+# The private key stays inside the blockchain wrapper service.
+# This application never needs the wallet/private key.
+
+BLOCKCHAIN_SERVICE_URL = os.getenv(
+    "BLOCKCHAIN_SERVICE_URL",
+    "http://localhost:4001",
+).rstrip("/")
+
+
+# ============================================================
 # TESSERACT CONFIGURATION
 # ============================================================
 
@@ -66,14 +98,20 @@ def configure_tesseract():
     """
 
     possible_paths = [
-        Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
-        Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
-        Path.home()
-        / "AppData"
-        / "Local"
-        / "Programs"
-        / "Tesseract-OCR"
-        / "tesseract.exe",
+        Path(
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        ),
+        Path(
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"
+        ),
+        (
+            Path.home()
+            / "AppData"
+            / "Local"
+            / "Programs"
+            / "Tesseract-OCR"
+            / "tesseract.exe"
+        ),
     ]
 
     current = pytesseract.pytesseract.tesseract_cmd
@@ -140,10 +178,6 @@ def choose_ocr_languages():
 # LAND DOCUMENT KEYWORDS
 # ============================================================
 
-# IMPORTANT:
-# Do NOT use short keywords like "cv" with substring matching.
-# All matching below is token/phrase based.
-
 LAND_KEYWORDS_EN = [
     "land",
     "property",
@@ -204,7 +238,6 @@ LAND_KEYWORDS_EN = [
 
 LAND_KEYWORDS_HI = [
     "भूमि",
-    "जमीन",
     "जमीन",
     "भूखंड",
     "प्लॉट",
@@ -275,8 +308,6 @@ ACQUISITION_KEYWORDS_HI = [
 ]
 
 
-# These are deliberately specific.
-# "cv" is NOT included.
 NON_LAND_KEYWORDS = [
     "curriculum vitae",
     "resume",
@@ -329,6 +360,168 @@ def save_records(records):
         ),
         encoding="utf-8",
     )
+
+
+# ============================================================
+# BLOCKCHAIN HELPERS
+# ============================================================
+
+def calculate_document_hash(data: bytes) -> str:
+    """
+    Generate a SHA-256 hash of the original uploaded file.
+
+    The result is returned as a 0x-prefixed 32-byte hex value,
+    which matches Solidity bytes32.
+
+    Example:
+        0xabc123...
+    """
+
+    digest = hashlib.sha256(data).hexdigest()
+
+    return f"0x{digest}"
+
+
+async def register_on_blockchain(
+    owner_name: Optional[str],
+    plot_number: Optional[str],
+    doc_hash: str,
+    ipfs_hash: str = "",
+):
+    """
+    Register a verified land document through the blockchain
+    wrapper service.
+
+    This application does NOT connect directly to Ethereum.
+
+    It calls:
+
+        POST {BLOCKCHAIN_SERVICE_URL}/register
+
+    The blockchain wrapper owns the wallet/private key.
+    """
+
+    if not owner_name:
+        return {
+            "registered": False,
+            "status": "not_registered",
+            "tx_hash": None,
+            "block_number": None,
+            "error": "Owner name is missing.",
+        }
+
+    if not plot_number:
+        return {
+            "registered": False,
+            "status": "not_registered",
+            "tx_hash": None,
+            "block_number": None,
+            "error": "Plot number is missing.",
+        }
+
+    payload = {
+        "owner_name": owner_name,
+        "plot_number": plot_number,
+        "doc_hash": doc_hash,
+        "ipfs_hash": ipfs_hash,
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0
+        ) as client:
+
+            response = await client.post(
+                f"{BLOCKCHAIN_SERVICE_URL}/register",
+                json=payload,
+            )
+
+        # Plot already exists on blockchain.
+        if response.status_code == 409:
+            try:
+                response_data = response.json()
+            except Exception:
+                response_data = {}
+
+            return {
+                "registered": False,
+                "status": "conflict",
+                "tx_hash": None,
+                "block_number": None,
+                "error": (
+                    response_data.get("detail")
+                    or "Plot is already registered on blockchain."
+                ),
+            }
+
+        # Any other HTTP error.
+        if response.status_code >= 400:
+            try:
+                response_data = response.json()
+            except Exception:
+                response_data = {}
+
+            return {
+                "registered": False,
+                "status": "error",
+                "tx_hash": None,
+                "block_number": None,
+                "error": (
+                    response_data.get("detail")
+                    or f"Blockchain service returned HTTP {response.status_code}."
+                ),
+            }
+
+        try:
+            response_data = response.json()
+        except Exception:
+            response_data = {}
+
+        return {
+            "registered": True,
+            "status": response_data.get(
+                "status",
+                "pending",
+            ),
+            "tx_hash": response_data.get(
+                "tx_hash"
+            ),
+            "block_number": response_data.get(
+                "block_number"
+            ),
+            "error": None,
+        }
+
+    except httpx.ConnectError:
+        return {
+            "registered": False,
+            "status": "unavailable",
+            "tx_hash": None,
+            "block_number": None,
+            "error": (
+                "Blockchain wrapper service is unavailable."
+            ),
+        }
+
+    except httpx.TimeoutException:
+        return {
+            "registered": False,
+            "status": "timeout",
+            "tx_hash": None,
+            "block_number": None,
+            "error": (
+                "Blockchain wrapper service timed out."
+            ),
+        }
+
+    except Exception as exc:
+        return {
+            "registered": False,
+            "status": "error",
+            "tx_hash": None,
+            "block_number": None,
+            "error": str(exc),
+        }
 
 
 # ============================================================
@@ -398,6 +591,7 @@ def extract_native_pdf_text(
             stream=pdf_bytes,
             filetype="pdf",
         )
+
     except Exception as exc:
         raise HTTPException(
             status_code=422,
@@ -408,6 +602,7 @@ def extract_native_pdf_text(
 
     try:
         for page in doc:
+
             try:
                 text = page.get_text("text")
 
@@ -433,13 +628,10 @@ def preprocess_image(
 
     image = image.convert("RGB")
 
-    # Grayscale
     image = ImageOps.grayscale(image)
 
-    # Increase contrast
     image = ImageOps.autocontrast(image)
 
-    # Light sharpening
     image = image.filter(
         ImageFilter.SHARPEN
     )
@@ -472,14 +664,16 @@ def ocr_image(
             lang=languages,
             config=config,
         )
+
     except Exception:
-        # Fallback to English if combined OCR fails.
+
         try:
             text = pytesseract.image_to_string(
                 image,
                 lang="eng",
                 config=config,
             )
+
         except Exception:
             text = ""
 
@@ -493,7 +687,11 @@ def ocr_image(
             config=config,
         )
 
-        for value in data.get("conf", []):
+        for value in data.get(
+            "conf",
+            [],
+        ):
+
             try:
                 confidence = float(value)
 
@@ -502,7 +700,10 @@ def ocr_image(
                         confidence
                     )
 
-            except (ValueError, TypeError):
+            except (
+                ValueError,
+                TypeError,
+            ):
                 continue
 
     except Exception:
@@ -518,7 +719,7 @@ def ocr_image(
 
     return (
         text.strip(),
-        round(confidence, 3),
+        confidence,
     )
 
 
@@ -547,7 +748,6 @@ def pdf_ocr(pdf_bytes: bytes):
     try:
         for page in doc:
 
-            # 250-300 DPI is generally good for documents.
             pix = page.get_pixmap(
                 matrix=pymupdf.Matrix(
                     3,
@@ -607,7 +807,8 @@ def extract_document_text(
     """
     Prefer native PDF text.
 
-    If native text is too short, use OCR.
+    If native text is too short,
+    use OCR.
     """
 
     native_text = extract_native_pdf_text(
@@ -616,8 +817,6 @@ def extract_document_text(
 
     native_text = native_text.strip()
 
-    # If the PDF contains substantial selectable text,
-    # don't unnecessarily OCR it.
     if len(native_text) >= 120:
         return (
             native_text,
@@ -626,11 +825,14 @@ def extract_document_text(
             None,
         )
 
-    ocr_text, ocr_confidence, ocr_language = (
-        pdf_ocr(pdf_bytes)
+    (
+        ocr_text,
+        ocr_confidence,
+        ocr_language,
+    ) = pdf_ocr(
+        pdf_bytes
     )
 
-    # Use whichever extraction produced more text.
     if len(ocr_text) > len(native_text):
         return (
             ocr_text,
@@ -659,14 +861,15 @@ def extract_document_text(
 # TEXT NORMALIZATION
 # ============================================================
 
-def normalize_text(text: str) -> str:
+def normalize_text(
+    text: str,
+) -> str:
 
     text = text.replace(
         "\x00",
         " ",
     )
 
-    # Keep Devanagari characters.
     text = re.sub(
         r"[ \t]+",
         " ",
@@ -734,19 +937,11 @@ def keyword_present(
     if not normalized_keyword:
         return False
 
-    # Phrase matching.
-    #
-    # This prevents things such as:
-    #
-    #     "cv"
-    #
-    # from accidentally matching random text.
-    #
     if " " in normalized_keyword:
         return normalized_keyword in normalized_text
 
-    # English short words need boundaries.
     if normalized_keyword.isascii():
+
         pattern = (
             r"(?<![a-z0-9])"
             + re.escape(normalized_keyword)
@@ -761,7 +956,6 @@ def keyword_present(
             )
         )
 
-    # Hindi / Unicode word matching.
     pattern = (
         r"(?<!\w)"
         + re.escape(normalized_keyword)
@@ -784,6 +978,7 @@ def find_keyword_hits(
     hits = []
 
     for keyword in keywords:
+
         if keyword_present(
             text,
             keyword,
@@ -807,15 +1002,17 @@ def detect_document_type(
     More tolerant land-document classifier.
 
     A document can be:
+
         land/property
         acquisition
         unknown/non-land
 
-    Importantly, failure to extract fields does NOT
+    Failure to extract fields does NOT
     automatically mean it is a non-land document.
     """
 
     if not text.strip():
+
         return {
             "is_land_document": False,
             "document_type": "Unknown document",
@@ -861,10 +1058,8 @@ def detect_document_type(
         + len(acquisition_hits_hi)
     )
 
-    # Strong land evidence.
-    #
-    # We don't require two exact fields anymore.
     if total_acquisition_hits >= 1:
+
         return {
             "is_land_document": True,
             "document_type": "Land acquisition document",
@@ -881,6 +1076,7 @@ def detect_document_type(
         }
 
     if total_land_hits >= 2:
+
         return {
             "is_land_document": True,
             "document_type": "Land/property document",
@@ -896,13 +1092,12 @@ def detect_document_type(
             "non_land_keyword_hits": non_land_hits,
         }
 
-    # If there are many strong non-land phrases
-    # and virtually no land evidence, reject.
     if (
         len(non_land_hits) >= 2
         and total_land_hits == 0
         and total_acquisition_hits == 0
     ):
+
         return {
             "is_land_document": False,
             "document_type": "Non-land document",
@@ -943,109 +1138,158 @@ def detect_document_type(
 PATTERNS = {
 
     "owner_name": [
-        r"(?:owner\s*name|name\s*of\s*owner|landowner)"
-        r"\s*[:\-]\s*([A-Za-z][A-Za-z .]{2,100})",
 
-        r"\bowner\s*[:\-]\s*"
-        r"([A-Za-z][A-Za-z .]{2,100})",
+        (
+            r"(?:owner\s*name|name\s*of\s*owner|landowner)"
+            r"\s*[:\-]\s*([A-Za-z][A-Za-z .]{2,100})"
+        ),
 
-        r"(?:नाम\s*[:\-]\s*)"
-        r"([\u0900-\u097F][\u0900-\u097F .]{2,100})",
+        (
+            r"\bowner\s*[:\-]\s*"
+            r"([A-Za-z][A-Za-z .]{2,100})"
+        ),
 
-        r"(?:भूमि\s*स्वामी|भूस्वामी)"
-        r"\s*[:\-]\s*"
-        r"([\u0900-\u097F][\u0900-\u097F .]{2,100})",
+        (
+            r"(?:नाम\s*[:\-]\s*)"
+            r"([\u0900-\u097F][\u0900-\u097F .]{2,100})"
+        ),
+
+        (
+            r"(?:भूमि\s*स्वामी|भूस्वामी)"
+            r"\s*[:\-]\s*"
+            r"([\u0900-\u097F][\u0900-\u097F .]{2,100})"
+        ),
     ],
 
     "plot_number": [
-        r"(?:plot\s*(?:no\.?|number)|plot\s*id)"
-        r"\s*[:\-]\s*"
-        r"([A-Za-z0-9./\-]{1,40})",
 
-        r"(?:प्लॉट|भूखंड)"
-        r"\s*(?:क्रमांक|नंबर|संख्या|क्र\.?)?"
-        r"\s*[:\-]?\s*"
-        r"([A-Za-z0-9./\-]{1,40})",
+        (
+            r"(?:plot\s*(?:no\.?|number)|plot\s*id)"
+            r"\s*[:\-]\s*"
+            r"([A-Za-z0-9./\-]{1,40})"
+        ),
+
+        (
+            r"(?:प्लॉट|भूखंड)"
+            r"\s*(?:क्रमांक|नंबर|संख्या|क्र\.?)?"
+            r"\s*[:\-]?\s*"
+            r"([A-Za-z0-9./\-]{1,40})"
+        ),
     ],
 
     "survey_number": [
-        r"(?:survey\s*(?:no\.?|number)|"
-        r"s\.?\s*no\.?)"
-        r"\s*[:\-]\s*"
-        r"([A-Za-z0-9./\-]{1,40})",
 
-        r"(?:khasra\s*(?:no\.?|number))"
-        r"\s*[:\-]?\s*"
-        r"([A-Za-z0-9./\-]{1,40})",
+        (
+            r"(?:survey\s*(?:no\.?|number)|"
+            r"s\.?\s*no\.?)"
+            r"\s*[:\-]\s*"
+            r"([A-Za-z0-9./\-]{1,40})"
+        ),
 
-        r"(?:खसरा)"
-        r"\s*(?:क्रमांक|नंबर|संख्या|क्र\.?)?"
-        r"\s*[:\-]?\s*"
-        r"([A-Za-z0-9./\-]{1,40})",
+        (
+            r"(?:khasra\s*(?:no\.?|number))"
+            r"\s*[:\-]?\s*"
+            r"([A-Za-z0-9./\-]{1,40})"
+        ),
 
-        r"(?:सर्वे)"
-        r"\s*(?:क्रमांक|नंबर|संख्या|क्र\.?)?"
-        r"\s*[:\-]?\s*"
-        r"([A-Za-z0-9./\-]{1,40})",
+        (
+            r"(?:खसरा)"
+            r"\s*(?:क्रमांक|नंबर|संख्या|क्र\.?)?"
+            r"\s*[:\-]?\s*"
+            r"([A-Za-z0-9./\-]{1,40})"
+        ),
+
+        (
+            r"(?:सर्वे)"
+            r"\s*(?:क्रमांक|नंबर|संख्या|क्र\.?)?"
+            r"\s*[:\-]?\s*"
+            r"([A-Za-z0-9./\-]{1,40})"
+        ),
     ],
 
     "address": [
-        r"address\s*[:\-]\s*"
-        r"([A-Za-z0-9 ,./\-\n]{5,200})",
 
-        r"(?:property|site)\s*address"
-        r"\s*[:\-]\s*"
-        r"([A-Za-z0-9 ,./\-\n]{5,200})",
+        (
+            r"address\s*[:\-]\s*"
+            r"([A-Za-z0-9 ,./\-\n]{5,200})"
+        ),
 
-        r"(?:पता|स्थान)"
-        r"\s*[:\-]\s*"
-        r"([\u0900-\u097F0-9 ,./\-\n]{5,200})",
+        (
+            r"(?:property|site)\s*address"
+            r"\s*[:\-]\s*"
+            r"([A-Za-z0-9 ,./\-\n]{5,200})"
+        ),
+
+        (
+            r"(?:पता|स्थान)"
+            r"\s*[:\-]\s*"
+            r"([\u0900-\u097F0-9 ,./\-\n]{5,200})"
+        ),
     ],
 
     "area": [
-        r"area\s*[:\-]?\s*"
-        r"([\d,.]+)\s*"
-        r"(sq\.?\s*ft|sqft|square\s*feet|"
-        r"sq\.?\s*m|square\s*meter|"
-        r"hectare|hectares|acre|acres)?",
 
-        r"(?:area|extent)"
-        r"\s*[:\-]\s*"
-        r"([\d,.]+)",
+        (
+            r"area\s*[:\-]?\s*"
+            r"([\d,.]+)\s*"
+            r"(sq\.?\s*ft|sqft|square\s*feet|"
+            r"sq\.?\s*m|square\s*meter|"
+            r"hectare|hectares|acre|acres)?"
+        ),
 
-        r"(?:क्षेत्रफल|रकबा)"
-        r"\s*[:\-]?\s*"
-        r"([\d,.]+)",
+        (
+            r"(?:area|extent)"
+            r"\s*[:\-]\s*"
+            r"([\d,.]+)"
+        ),
+
+        (
+            r"(?:क्षेत्रफल|रकबा)"
+            r"\s*[:\-]?\s*"
+            r"([\d,.]+)"
+        ),
     ],
 
     "registration_date": [
-        r"(?:registration\s*date|"
-        r"date\s*of\s*registration|"
-        r"reg\.?\s*date)"
-        r"\s*[:\-]\s*"
-        r"(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})",
 
-        r"(?:registration\s*date|"
-        r"date\s*of\s*registration)"
-        r"\s*[:\-]\s*"
-        r"([A-Za-z]+\s+\d{1,2},?\s+\d{4})",
+        (
+            r"(?:registration\s*date|"
+            r"date\s*of\s*registration|"
+            r"reg\.?\s*date)"
+            r"\s*[:\-]\s*"
+            r"(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})"
+        ),
 
-        r"(?:पंजीकरण\s*दिनांक|"
-        r"पंजीयन\s*दिनांक)"
-        r"\s*[:\-]\s*"
-        r"(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})",
+        (
+            r"(?:registration\s*date|"
+            r"date\s*of\s*registration)"
+            r"\s*[:\-]\s*"
+            r"([A-Za-z]+\s+\d{1,2},?\s+\d{4})"
+        ),
+
+        (
+            r"(?:पंजीकरण\s*दिनांक|"
+            r"पंजीयन\s*दिनांक)"
+            r"\s*[:\-]\s*"
+            r"(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})"
+        ),
     ],
 
     "notification_date": [
-        r"(?:notification\s*date|"
-        r"date\s*of\s*notification)"
-        r"\s*[:\-]\s*"
-        r"(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})",
 
-        r"(?:अधिसूचना\s*दिनांक|"
-        r"अधिसूचना\s*तिथि)"
-        r"\s*[:\-]\s*"
-        r"(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})",
+        (
+            r"(?:notification\s*date|"
+            r"date\s*of\s*notification)"
+            r"\s*[:\-]\s*"
+            r"(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})"
+        ),
+
+        (
+            r"(?:अधिसूचना\s*दिनांक|"
+            r"अधिसूचना\s*तिथि)"
+            r"\s*[:\-]\s*"
+            r"(\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4})"
+        ),
     ],
 }
 
@@ -1071,6 +1315,7 @@ def extract_field(
         )
 
         if match:
+
             value = match.group(1)
 
             value = " ".join(
@@ -1085,6 +1330,7 @@ def extract_field(
 def parse_date(
     value: Optional[str],
 ):
+
     if not value:
         return None
 
@@ -1105,10 +1351,12 @@ def parse_date(
 def parse_number(
     value: Optional[str],
 ):
+
     if not value:
         return None
 
     try:
+
         cleaned = re.sub(
             r"[^0-9.]",
             "",
@@ -1124,7 +1372,9 @@ def parse_number(
         return None
 
 
-def parse_fields(text: str):
+def parse_fields(
+    text: str,
+):
 
     owner_name = extract_field(
         "owner_name",
@@ -1191,19 +1441,8 @@ def validate_land_fields(
     document_detection,
 ):
     """
-    IMPORTANT:
-
     Do not reject a genuine land document simply because
     OCR missed one field.
-
-    Acquisition notices in particular may contain:
-        notification
-        village
-        district
-        acquisition
-        compensation
-
-    without matching our exact owner/plot regex.
     """
 
     property_identifiers = [
@@ -1252,8 +1491,6 @@ def validate_land_fields(
         )
     )
 
-    # Strongest case:
-    # identifier + another useful field
     if (
         identifier_count >= 1
         and descriptive_count >= 1
@@ -1263,15 +1500,12 @@ def validate_land_fields(
             "Required property fields extracted.",
         )
 
-    # Several useful fields.
     if descriptive_count >= 3:
         return (
             True,
             "Multiple property fields extracted.",
         )
 
-    # Acquisition documents can legitimately have
-    # incomplete field extraction.
     if acquisition_hits >= 1 and (
         land_hits >= 1
         or descriptive_count >= 1
@@ -1282,8 +1516,6 @@ def validate_land_fields(
             "some fields may require manual review.",
         )
 
-    # Land terminology is strong enough to classify
-    # the document even when OCR missed fields.
     if land_hits >= 3:
         return (
             True,
@@ -1363,13 +1595,11 @@ def calculate_confidence(
         )
     )
 
-    # Field completeness.
     completeness = (
         0.70 * core_score
         + 0.30 * additional_score
     )
 
-    # Keyword evidence.
     keyword_score = min(
         1.0,
         (
@@ -1400,7 +1630,10 @@ def calculate_confidence(
 # SIMILARITY
 # ============================================================
 
-def similarity(a, b):
+def similarity(
+    a,
+    b,
+):
 
     if not a or not b:
         return 0
@@ -1468,9 +1701,8 @@ def find_matches(
             survey,
         )
 
-        # Only allow identifier-based duplicate
-        # matching when an identifier actually exists.
         if identifier_score > 0:
+
             score = (
                 0.60 * identifier_score
                 + 0.25 * owner
@@ -1478,8 +1710,7 @@ def find_matches(
             )
 
         else:
-            # Do not mark two records as duplicates
-            # merely because owner/address is similar.
+
             score = 0
 
         score = round(
@@ -1488,6 +1719,7 @@ def find_matches(
         )
 
         if score >= 0.70:
+
             matches.append(
                 {
                     "plot_number": record.get(
@@ -1567,8 +1799,6 @@ def is_exact_duplicate(
         ):
             return True
 
-        # Only consider owner a duplicate if
-        # BOTH property identifiers are missing.
         if (
             not incoming_plot
             and not incoming_survey
@@ -1591,6 +1821,7 @@ def is_exact_duplicate(
 # ============================================================
 
 def empty_record():
+
     return {
         "owner_name": None,
         "plot_number": None,
@@ -1608,6 +1839,7 @@ def analysis_response(
     extraction_method,
     ocr_language,
 ):
+
     return {
         "land_keyword_hits": detection.get(
             "land_keyword_hits",
@@ -1646,12 +1878,29 @@ async def verify(
     data = await file.read()
 
     if not data:
+
         raise HTTPException(
             status_code=400,
             detail="Uploaded document is empty.",
         )
 
-    filename = file.filename or "uploaded_document"
+    filename = (
+        file.filename
+        or "uploaded_document"
+    )
+
+
+    # --------------------------------------------------------
+    # DOCUMENT HASH
+    # --------------------------------------------------------
+
+    # Hash the ORIGINAL uploaded file.
+    #
+    # This hash is sent to the blockchain as bytes32.
+
+    doc_hash = calculate_document_hash(
+        data
+    )
 
 
     # --------------------------------------------------------
@@ -1669,6 +1918,7 @@ async def verify(
     # --------------------------------------------------------
 
     try:
+
         (
             text,
             extraction_confidence,
@@ -1679,6 +1929,7 @@ async def verify(
         )
 
     except Exception as exc:
+
         raise HTTPException(
             status_code=422,
             detail=(
@@ -1712,6 +1963,13 @@ async def verify(
                 "written": False,
                 "record_id": None,
             },
+            "blockchain": {
+                "registered": False,
+                "status": "not_registered",
+                "tx_hash": None,
+                "block_number": None,
+            },
+            "document_hash": doc_hash,
             "document_analysis": analysis_response(
                 {},
                 extraction_method,
@@ -1755,6 +2013,13 @@ async def verify(
                 "written": False,
                 "record_id": None,
             },
+            "blockchain": {
+                "registered": False,
+                "status": "not_registered",
+                "tx_hash": None,
+                "block_number": None,
+            },
+            "document_hash": doc_hash,
             "document_analysis": analysis_response(
                 document_detection,
                 extraction_method,
@@ -1807,6 +2072,13 @@ async def verify(
                 "written": False,
                 "record_id": None,
             },
+            "blockchain": {
+                "registered": False,
+                "status": "not_registered",
+                "tx_hash": None,
+                "block_number": None,
+            },
+            "document_hash": doc_hash,
             "document_analysis": analysis_response(
                 document_detection,
                 extraction_method,
@@ -1865,11 +2137,6 @@ async def verify(
     # MINIMUM CONFIDENCE
     # --------------------------------------------------------
 
-    #
-    # Acquisition notices often have weaker structured
-    # fields, so don't use the exact same threshold.
-    #
-
     if is_acquisition_document:
         minimum_confidence = 0.30
     else:
@@ -1900,6 +2167,13 @@ async def verify(
                 "written": False,
                 "record_id": None,
             },
+            "blockchain": {
+                "registered": False,
+                "status": "not_registered",
+                "tx_hash": None,
+                "block_number": None,
+            },
+            "document_hash": doc_hash,
             "document_analysis": analysis_response(
                 document_detection,
                 extraction_method,
@@ -1934,6 +2208,81 @@ async def verify(
                 "written": False,
                 "record_id": None,
             },
+            "blockchain": {
+                "registered": False,
+                "status": "not_registered",
+                "tx_hash": None,
+                "block_number": None,
+            },
+            "document_hash": doc_hash,
+            "document_analysis": analysis_response(
+                document_detection,
+                extraction_method,
+                ocr_language,
+            ),
+        }
+
+
+    # ========================================================
+    # BLOCKCHAIN REGISTRATION
+    # ========================================================
+
+    # The document has passed your verification pipeline.
+    #
+    # Now send the verified ownership record to the
+    # Blockchain wrapper.
+    #
+    # IPFS is not implemented in this application yet,
+    # therefore ipfs_hash is currently empty.
+
+    blockchain_result = await register_on_blockchain(
+        owner_name=fields.get(
+            "owner_name"
+        ),
+        plot_number=fields.get(
+            "plot_number"
+        ),
+        doc_hash=doc_hash,
+        ipfs_hash="",
+    )
+
+
+    # --------------------------------------------------------
+    # BLOCKCHAIN DUPLICATE
+    # --------------------------------------------------------
+
+    # Your local JSON ledger may not know about a record that
+    # already exists on-chain.
+    #
+    # If the blockchain wrapper says the plot already exists,
+    # do NOT create a second local Verified record.
+
+    if blockchain_result.get(
+        "status"
+    ) == "conflict":
+
+        return {
+            "verified": False,
+            "status": "Conflict",
+            "reason": (
+                "This plot is already registered "
+                "on the blockchain."
+            ),
+            "document_type": document_detection[
+                "document_type"
+            ],
+            "record": {
+                **fields,
+                "confidence_score": score,
+            },
+            "duplicate_flag": True,
+            "duplicate_matches": matches,
+            "ledger": {
+                "written": False,
+                "record_id": None,
+            },
+            "blockchain": blockchain_result,
+            "document_hash": doc_hash,
             "document_analysis": analysis_response(
                 document_detection,
                 extraction_method,
@@ -1943,7 +2292,7 @@ async def verify(
 
 
     # --------------------------------------------------------
-    # CREATE RECORD
+    # CREATE LOCAL RECORD
     # --------------------------------------------------------
 
     record_id = str(
@@ -1961,6 +2310,12 @@ async def verify(
         "verified_at": datetime.now(
             timezone.utc
         ).isoformat(),
+
+        # Original document hash.
+        "document_hash": doc_hash,
+
+        # Blockchain information.
+        "blockchain": blockchain_result,
     }
 
     records.append(
@@ -1973,7 +2328,7 @@ async def verify(
 
 
     # --------------------------------------------------------
-    # RESPONSE
+    # FINAL RESPONSE
     # --------------------------------------------------------
 
     return {
@@ -1981,7 +2336,7 @@ async def verify(
         "status": "Verified",
         "reason": (
             "Land/property document successfully "
-            "verified and written to the ledger."
+            "verified and written to the local ledger."
         ),
         "document_type": document_detection[
             "document_type"
@@ -1996,6 +2351,23 @@ async def verify(
             "written": True,
             "record_id": record_id,
         },
+
+        # Blockchain result.
+        #
+        # Example:
+        #
+        # {
+        #     "registered": true,
+        #     "status": "pending",
+        #     "tx_hash": "0x...",
+        #     "block_number": null
+        # }
+        #
+        "blockchain": blockchain_result,
+
+        # Useful for later verification.
+        "document_hash": doc_hash,
+
         "document_analysis": analysis_response(
             document_detection,
             extraction_method,
@@ -2088,6 +2460,7 @@ def search(
 def health():
 
     try:
+
         version = str(
             pytesseract.get_tesseract_version()
         )
@@ -2095,6 +2468,7 @@ def health():
         tesseract_available = True
 
     except Exception:
+
         version = None
         tesseract_available = False
 
@@ -2119,7 +2493,64 @@ def health():
         "records_stored": len(
             load_records()
         ),
+
+        # Useful for debugging the integration.
+        "blockchain_service_url": (
+            BLOCKCHAIN_SERVICE_URL
+        ),
     }
+
+
+# ============================================================
+# BLOCKCHAIN HEALTH
+# ============================================================
+
+@app.get("/api/blockchain/health")
+async def blockchain_health():
+    """
+    Check whether the Python service can reach
+    the Blockchain wrapper.
+    """
+
+    try:
+
+        async with httpx.AsyncClient(
+            timeout=5.0
+        ) as client:
+
+            response = await client.get(
+                f"{BLOCKCHAIN_SERVICE_URL}/health"
+            )
+
+        try:
+            wrapper_response = response.json()
+        except Exception:
+            wrapper_response = {}
+
+        return {
+            "status": (
+                "ok"
+                if response.status_code < 400
+                else "error"
+            ),
+            "blockchain_service_url": (
+                BLOCKCHAIN_SERVICE_URL
+            ),
+            "wrapper_status_code": (
+                response.status_code
+            ),
+            "wrapper": wrapper_response,
+        }
+
+    except Exception as exc:
+
+        return {
+            "status": "unavailable",
+            "blockchain_service_url": (
+                BLOCKCHAIN_SERVICE_URL
+            ),
+            "error": str(exc),
+        }
 
 
 # ============================================================
@@ -2131,9 +2562,12 @@ def root():
 
     return {
         "name": "Adhikar",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "status": "running",
         "service": "Digital Land Registry",
+        "blockchain_service": (
+            BLOCKCHAIN_SERVICE_URL
+        ),
     }
 
 
