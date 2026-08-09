@@ -13,6 +13,10 @@ from dateutil import parser as dateparser
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from rapidfuzz import fuzz
+import os
+import hashlib
+import requests
+from dotenv import load_dotenv
 
 
 # ============================================================
@@ -39,7 +43,9 @@ app.add_middleware(
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv()
 
+BLOCKCHAIN_SERVICE_URL = os.getenv("BLOCKCHAIN_SERVICE_URL", "http://localhost:4001")
 DATA_DIR = BASE_DIR / "data"
 RECORDS_FILE = DATA_DIR / "records.json"
 
@@ -1628,7 +1634,29 @@ def analysis_response(
         "extraction_method": extraction_method,
         "ocr_language": ocr_language,
     }
+def register_on_blockchain(owner_name, plot_number, doc_bytes, ipfs_hash="ipfs://not-uploaded"):
+    """
+    Calls the blockchain wrapper service to register this record on-chain.
+    Returns the wrapper's response dict, or None if it fails
+    (verification should still succeed locally even if this fails).
+    """
+    doc_hash = hashlib.sha256(doc_bytes).hexdigest()
 
+    try:
+        response = requests.post(
+            f"{BLOCKCHAIN_SERVICE_URL}/register",
+            json={
+                "owner_name": owner_name,
+                "plot_number": plot_number,
+                "doc_hash": doc_hash,
+                "ipfs_hash": ipfs_hash,
+            },
+            timeout=10,
+        )
+        return response.json()
+    except Exception as exc:
+        print(f"Blockchain registration failed: {exc}")
+        return None
 
 # ============================================================
 # VERIFY DOCUMENT
@@ -1754,6 +1782,7 @@ async def verify(
             "ledger": {
                 "written": False,
                 "record_id": None,
+                
             },
             "document_analysis": analysis_response(
                 document_detection,
@@ -1877,7 +1906,6 @@ async def verify(
 
 
     if score < minimum_confidence:
-
         return {
             "verified": False,
             "status": "Needs Review",
@@ -1970,6 +1998,11 @@ async def verify(
     save_records(
         records
     )
+    blockchain_result = register_on_blockchain(
+        owner_name=fields.get("owner_name"),
+        plot_number=fields.get("plot_number"),
+        doc_bytes=data,
+    )
 
 
     # --------------------------------------------------------
@@ -1995,6 +2028,7 @@ async def verify(
         "ledger": {
             "written": True,
             "record_id": record_id,
+            "blockchain": blockchain_result,
         },
         "document_analysis": analysis_response(
             document_detection,
@@ -2027,6 +2061,7 @@ def recent_ledger(
         ),
         "count": len(records),
     }
+
 
 
 # ============================================================

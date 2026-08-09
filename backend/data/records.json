@@ -10,5 +10,47 @@
     "confidence_score": 0.374,
     "status": "Verified",
     "verified_at": "2026-08-08T15:27:19.614821+00:00"
+  },
+  {
+    "record_id": "e942b8b1-9636-4c77-8397-b0b6ae0cc209",
+    "owner_name": null,
+    "plot_number": null,
+    "survey_number": null,
+    "address": null,
+    "area_sqft": 1250.0,
+    "registration_date": null,
+    "notification_date": null,
+    "document_type": "Land/property document",
+    "confidence_score": 0.55,
+    "status": "Verified",
+    "verified_at": "2026-08-09T13:59:44.562891+00:00"
+  },
+  {
+    "record_id": "5f949ad2-88ac-4a2f-8f68-6fe3802332e7",
+    "owner_name": "Ramesh Kumar Sharma",
+    "plot_number": "PLOT-001",
+    "survey_number": "245/2",
+    "address": "House No. 12, Rajendra Nagar, Indore, Madhya Pradesh, 452001 Area",
+    "area_sqft": 1250.0,
+    "registration_date": "2024-06-15",
+    "notification_date": null,
+    "document_type": "Land/property document",
+    "confidence_score": 0.95,
+    "status": "Verified",
+    "verified_at": "2026-08-09T14:07:53.760607+00:00"
+  },
+  {
+    "record_id": "09281bad-4ce0-4dd7-b904-61d2e36a2764",
+    "owner_name": "Anil Kumar Verma",
+    "plot_number": "SEC9-B-77",
+    "survey_number": "88/4",
+    "address": "Flat 302, Green Valley Apartments, Nanakheda, Ujjain, MP, 456010 Area",
+    "area_sqft": 1600.0,
+    "registration_date": "2025-03-03",
+    "notification_date": null,
+    "document_type": "Land/property document",
+    "confidence_score": 0.95,
+    "status": "Verified",
+    "verified_at": "2026-08-09T14:32:43.812249+00:00"
   }
 ]
