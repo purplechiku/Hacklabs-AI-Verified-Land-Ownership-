@@ -9,12 +9,12 @@ An end-to-end system for verifying and registering land ownership records, combi
 ## How it fits together
 
 ```
-┌───────────┐      ┌───────────┐      ┌────────────────┐      ┌──────────────────┐
-│  Frontend │ ───▶ │  Backend  │ ───▶ │  AI/ML Service  │      │  Blockchain       │
-│           │      │           │ ───▶ │  (extraction)   │      │  Wrapper Service  │
-│           │ ◀─── │           │ ◀─── └────────────────┘      │  ──▶ Smart        │
-│           │      │           │ ───────────────────────────▶ │      Contract      │
-└───────────┘      └───────────┘                              └──────────────────┘
+┌───────────┐      ┌───────────┐       ┌────────────────┐      ┌──────────────────┐
+│  Frontend │ ───▶ │  Backend  │ ───▶ │  AI/ML Service │      │  Blockchain       │
+│           │      │           │ ───▶  │  (extraction)  │      │  Wrapper Service  │
+│           │ ◀─── │           │ ◀─── └────────────────┘       │  ──▶ Smart        │
+│           │      │           │ ───────────────────────────▶   │      Contract      │
+└───────────┘      └───────────┘                                 └──────────────────┘
 ```
 
 - **Frontend** — the user-facing app. Uploads land documents, shows extraction results, and displays verified ownership records. Never talks to the AI/ML service or Blockchain directly — everything goes through the Backend.
@@ -27,13 +27,13 @@ An end-to-end system for verifying and registering land ownership records, combi
 ## Repository structure
 
 ```
-├── frontend/           # User-facing web app
-├── backend/             # Orchestration API — talks to AI/ML + Blockchain
-├── contracts/           # Solidity smart contract (LandRegistry.sol)
-├── scripts/              # Hardhat deploy scripts
-├── test/                  # Hardhat/Chai contract tests
-├── wrapper-service/  # HTTP wrapper the Backend calls for blockchain reads/writes
-├── docs_contracts_aiml.md  # AI/ML service API contract (for Backend integration)
+├── frontend/               # User-facing web app
+├── backend/               # Orchestration API — talks to AI/ML + Blockchain
+├── contracts/             # Solidity smart contract (LandRegistry.sol)
+├── scripts/                # Hardhat deploy scripts
+├── test/                    # Hardhat/Chai contract tests
+├── wrapper-service/          # HTTP wrapper the Backend calls for blockchain reads/writes
+├── docs_contracts_aiml.md    # AI/ML service API contract (for Backend integration)
 ├── hardhat.config.js
 ├── package.json
 └── README.md            # this file
@@ -192,11 +192,11 @@ The wrapper service currently only runs at `http://localhost:4001` on the Blockc
 
 ## Team — Momo Warriors
 
-| Module | Owner |
-|---|---|
-| Frontend | — |
-| Backend | — |
-| AI/ML | Person B |
-| Blockchain | Person C |
+| Module      | Owner |
+|------------|--------------|
+| Frontend   |Pavni Pawar   |
+| Backend    | Arnav Kekre  |
+| AI/ML      |HarshitaVerma |
+| Blockchain | Amber Saluja |
 
 Built for HackLabs 2026.
