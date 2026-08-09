@@ -1,0 +1,16 @@
+node_modules/
+.env
+artifacts/
+cache/
+typechain-types/
+
+wrapper-service/node_modules/
+wrapper-service/.env
+wrapper-service/data/*.db
+wrapper-service/data/*.db-journal
+wrapper-service/data/*.db-wal
+wrapper-service/data/*.db-shm
+
+# deploy.js writes these fresh on every deploy — don't commit stale ones
+wrapper-service/src/contract-data/LandRegistry.address.json
+wrapper-service/src/contract-data/LandRegistry.abi.json
