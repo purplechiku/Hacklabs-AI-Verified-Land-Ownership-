@@ -2191,41 +2191,35 @@ async def verify(
     # DUPLICATE / CONFLICT
     # --------------------------------------------------------
 
-    if exact_duplicate or matches:
-
+    if exact_duplicate:
         return {
-            "verified": False,
-            "status": "Conflict",
-            "reason": (
-                "A matching registry record "
-                "already exists."
-            ),
-            "document_type": document_detection[
-                "document_type"
-            ],
-            "record": {
-                **fields,
-                "confidence_score": score,
-            },
-            "duplicate_flag": exact_duplicate,
-            "duplicate_matches": matches,
-            "ledger": {
-                "written": False,
-                "record_id": None,
-            },
-            "blockchain": {
-                "registered": False,
-                "status": "not_registered",
-                "tx_hash": None,
-                "block_number": None,
-            },
-            "document_hash": doc_hash,
-            "document_analysis": analysis_response(
-                document_detection,
-                extraction_method,
-                ocr_language,
-            ),
-        }
+        "verified": False,
+        "status": "Conflict",
+        "reason": "An exact matching registry record already exists.",
+        "document_type": document_detection["document_type"],
+        "record": {
+            **fields,
+            "confidence_score": score,
+        },
+        "duplicate_flag": True,
+        "duplicate_matches": matches,
+        "ledger": {
+            "written": False,
+            "record_id": None,
+        },
+        "blockchain": {
+            "registered": False,
+            "status": "not_registered",
+            "tx_hash": None,
+            "block_number": None,
+        },
+        "document_hash": doc_hash,
+        "document_analysis": analysis_response(
+            document_detection,
+            extraction_method,
+            ocr_language,
+        ),
+    }
 
 
     # ========================================================
