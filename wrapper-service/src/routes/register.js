@@ -14,9 +14,9 @@ router.post("/register", async (req, res) => {
   try {
     const { owner_name, plot_number, doc_hash, ipfs_hash } = req.body || {};
 
-    if (!owner_name || !plot_number || !doc_hash || !ipfs_hash) {
+    if (!owner_name || !plot_number || !doc_hash ) {
       return res.status(400).json({
-        error: "owner_name, plot_number, doc_hash, and ipfs_hash are all required"
+        error: "owner_name, plot_number, and doc_hash are all required"
       });
     }
 
