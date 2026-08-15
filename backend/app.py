@@ -1866,29 +1866,6 @@ def analysis_response(
         "extraction_method": extraction_method,
         "ocr_language": ocr_language,
     }
-def register_on_blockchain(owner_name, plot_number, doc_bytes, ipfs_hash="ipfs://not-uploaded"):
-    """
-    Calls the blockchain wrapper service to register this record on-chain.
-    Returns the wrapper's response dict, or None if it fails
-    (verification should still succeed locally even if this fails).
-    """
-    doc_hash = hashlib.sha256(doc_bytes).hexdigest()
-
-    try:
-        response = requests.post(
-            f"{BLOCKCHAIN_SERVICE_URL}/register",
-            json={
-                "owner_name": owner_name,
-                "plot_number": plot_number,
-                "doc_hash": doc_hash,
-                "ipfs_hash": ipfs_hash,
-            },
-            timeout=10,
-        )
-        return response.json()
-    except Exception as exc:
-        print(f"Blockchain registration failed: {exc}")
-        return None
 
 # ============================================================
 # VERIFY DOCUMENT
@@ -2353,13 +2330,7 @@ async def verify(
     save_records(
         records
     )
-    blockchain_result = register_on_blockchain(
-        owner_name=fields.get("owner_name"),
-        plot_number=fields.get("plot_number"),
-        doc_bytes=data,
-    )
-
-
+    
     # --------------------------------------------------------
     # FINAL RESPONSE
     # --------------------------------------------------------
